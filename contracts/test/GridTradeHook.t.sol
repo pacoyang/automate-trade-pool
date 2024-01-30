@@ -31,7 +31,7 @@ contract GridTradeHookTest is Test, Deployers {
 
     // Deploy the hook to an address with the correct flags
     uint160 flags = uint160(
-      Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG
+      Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.ACCESS_LOCK_FLAG
     );
     (address hookAddress, bytes32 salt) =
         HookMiner.find(address(this), flags, type(GridTradeHook).creationCode, abi.encode(address(manager), ""));
@@ -48,67 +48,54 @@ contract GridTradeHookTest is Test, Deployers {
     modifyLiquidityRouter.modifyLiquidity(key, IPoolManager.ModifyLiquidityParams(-120, 120, 10 ether), ZERO_BYTES);
     modifyLiquidityRouter.modifyLiquidity(
       key,
-      IPoolManager.ModifyLiquidityParams(TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 10 ether),
+      IPoolManager.ModifyLiquidityParams(TickMath.minUsableTick(60), TickMath.maxUsableTick(60), 100 ether),
       ZERO_BYTES
     );
   }
 
-  function test_placeOrder() public {
-    int24 minTick = TickMath.MIN_TICK;
-    int24 maxTick = TickMath.MAX_TICK;
-    uint24 gridStep = 500;
-    uint24 gridNum = 5;
-    uint256 gridAmount = 1 ether;
-    uint256 amountIn = 10 ether;
+  function testPlaceOrder() public {
+    uint256 amountIn = 1 ether;
     bool zeroForOne = true;
 
     uint256 originalBalance = IERC20Minimal(Currency.unwrap(currency0)).balanceOf(address(this));
 
     // Place the order
     IERC20Minimal(Currency.unwrap(currency0)).approve(address(hook), amountIn);
-    uint256 tokenId = hook.placeOrder(
+    uint256[] memory tokenIds = hook.placeOrder(
       key,
-      minTick,
-      maxTick,
-      gridStep,
-      gridNum,
-      gridAmount,
       amountIn,
-      zeroForOne
+      zeroForOne,
+      500,
+      5
     );
 
     uint256 newBalance = IERC20Minimal(Currency.unwrap(currency0)).balanceOf(address(this));
 
     assertEq(originalBalance - newBalance, amountIn);
 
-    uint256 tokenBalance = hook.balanceOf(address(this), tokenId);
+    uint256 totalTokenBalance;
+    for (uint i = 0; i < tokenIds.length; i++) {
+      totalTokenBalance += hook.balanceOf(address(this), tokenIds[i]);
+    }
 
-    assertTrue(tokenId != 0);
-    assertEq(tokenBalance, amountIn);
+    assertEq(tokenIds.length, 5);
+    assertEq(totalTokenBalance, amountIn);
   }
 
-  function test_cancelOrder() public {
+  function testCancelOrder() public {
     // Place an order similar as earlier, but cancel it later
-    int24 minTick = TickMath.MIN_TICK;
-    int24 maxTick = TickMath.MAX_TICK;
-    uint24 gridStep = 500;
-    uint24 gridNum = 5;
-    uint256 gridAmount = 1 ether;
-    uint256 amountIn = 10 ether;
+    uint256 amountIn = 1 ether;
     bool zeroForOne = true;
 
     uint256 originalBalance = IERC20Minimal(Currency.unwrap(currency0)).balanceOf(address(this));
 
     IERC20Minimal(Currency.unwrap(currency0)).approve(address(hook), amountIn);
-    uint256 tokenId = hook.placeOrder(
+    uint256[] memory tokenIds = hook.placeOrder(
       key,
-      minTick,
-      maxTick,
-      gridStep,
-      gridNum,
-      gridAmount,
       amountIn,
-      zeroForOne
+      zeroForOne,
+      500,
+      5
     );
 
     uint256 newBalance = IERC20Minimal(Currency.unwrap(currency0)).balanceOf(address(this));
@@ -116,25 +103,92 @@ contract GridTradeHookTest is Test, Deployers {
     assertEq(originalBalance - newBalance, amountIn);
 
     // Check the balance of ERC-1155 tokens we received
-    uint256 tokenBalance = hook.balanceOf(address(this), tokenId);
-    assertEq(tokenBalance, amountIn);
+    uint256 totalTokenBalance;
+    for (uint i = 0; i < tokenIds.length; i++) {
+      totalTokenBalance += hook.balanceOf(address(this), tokenIds[i]);
+    }
+    assertEq(totalTokenBalance, amountIn);
 
     // Cancel the order
-    hook.cancelOrder(
-      key,
-      minTick,
-      maxTick,
-      gridStep,
-      gridNum,
-      gridAmount,
-      zeroForOne
-    );
+    for (uint i = 0; i < tokenIds.length; i++) {
+      hook.cancelOrder(tokenIds[i]);
+    }
 
     uint256 finalBalance = IERC20Minimal(Currency.unwrap(currency0)).balanceOf(address(this));
     assertEq(finalBalance, originalBalance);
 
-    tokenBalance = hook.balanceOf(address(this), tokenId);
-    assertEq(tokenBalance, 0);
+    totalTokenBalance = 0;
+    for (uint i = 0; i < tokenIds.length; i++) {
+      totalTokenBalance += hook.balanceOf(address(this), tokenIds[i]);
+    }
+    assertEq(totalTokenBalance, 0);
+  }
+
+  function testExecuteOrderZeroForOne() public {
+    uint256 amountIn = 1 ether;
+    bool zeroForOne = true;
+    uint24 gridInterval = 100;
+    uint24 gridNum = 5;
+    uint256 positionAmount = uint256(amountIn / gridNum);
+
+    IERC20Minimal(Currency.unwrap(currency0)).approve(address(hook), amountIn);
+    uint256[] memory tokenIds = hook.placeOrder(
+      key,
+      amountIn,
+      zeroForOne,
+      gridInterval,
+      gridNum
+    );
+    assertEq(tokenIds.length, gridNum);
+
+    // Make token1 price up
+    IPoolManager.SwapParams memory params1 = IPoolManager.SwapParams({
+      zeroForOne: zeroForOne,
+      amountSpecified: 1 ether,
+      sqrtPriceLimitX96: TickMath.MIN_SQRT_RATIO + 1
+    });
+    PoolSwapTest.TestSettings memory testSettings1 = PoolSwapTest.TestSettings({
+      withdrawTokens: true,
+      settleUsingTransfer: true,
+      currencyAlreadySent: false
+    });
+    swapRouter.swap(key, params1, testSettings1, ZERO_BYTES);
+
+    // Make token1 price down
+    IPoolManager.SwapParams memory params2 = IPoolManager.SwapParams({
+      zeroForOne: !zeroForOne,
+      amountSpecified: 1 ether,
+      sqrtPriceLimitX96: TickMath.MAX_SQRT_RATIO - 1
+    });
+    PoolSwapTest.TestSettings memory testSettings2 = PoolSwapTest.TestSettings({
+      withdrawTokens: true,
+      settleUsingTransfer: true,
+      currencyAlreadySent: false
+    });
+    swapRouter.swap(key, params2, testSettings2, ZERO_BYTES);
+
+    // Check one of the orders have been executed
+    int256 tokensLeftToSell = hook.positions(key.toId(), -120, zeroForOne);
+    assertEq(tokensLeftToSell, 0);
+
+    // Check the hook has the expected amount of token1 to redeem
+    uint256 claimableTokens;
+    for (uint i = 0; i < tokenIds.length; i++) {
+      claimableTokens += hook.tokenIdClaimable(tokenIds[i]);
+    }
+    uint256 hookContractToken1Balance = IERC20Minimal(Currency.unwrap(currency1)).balanceOf(address(hook));
+    assertEq(claimableTokens, hookContractToken1Balance);
+
+    // Ensure we can redeem the token1
+    uint256 originalToken1Balance = IERC20Minimal(Currency.unwrap(currency1)).balanceOf(address(this));
+    for (uint i = 0; i < tokenIds.length; i++) {
+      if (hook.tokenIdClaimable(tokenIds[i]) > 0) {
+        hook.redeem(tokenIds[i], positionAmount, address(this));
+      }
+    }
+    uint256 newToken1Balance = IERC20Minimal(Currency.unwrap(currency1)).balanceOf(address(this));
+    assertEq(newToken1Balance - originalToken1Balance, claimableTokens);
+
   }
 
   // Add a couple of constant functions to

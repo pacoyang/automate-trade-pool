@@ -32,7 +32,7 @@ contract GridTradeHookScript is Script {
 
         // hook contracts must have specific flags encoded in the address
         uint160 permissions = uint160(
-          Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG
+          Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.ACCESS_LOCK_FLAG
         );
 
         // Mine a salt that will produce a hook address with the correct permissions
